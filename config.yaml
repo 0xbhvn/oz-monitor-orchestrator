@@ -1,0 +1,37 @@
+# Example configuration file for local development
+database_url: "postgresql://bhaven@localhost:5432/stellar_monitor_tenant"
+redis_url: "redis://localhost:6379"
+
+# Service mode: worker, block-watcher, api, or all
+service_mode: "all"
+
+# Worker configuration
+worker:
+  max_tenants_per_worker: 50
+  health_check_interval: 30s
+  tenant_reload_interval: 5m
+
+# Block cache configuration
+block_cache:
+  block_ttl: 60           # TTL for cached blocks in seconds
+  latest_block_ttl: 5     # TTL for latest block number in seconds  
+  key_prefix: "oz_cache"  # Redis key prefix
+
+# Load balancer configuration
+load_balancer:
+  strategy: "consistent_hashing"  # round_robin, least_loaded, consistent_hashing, activity_based
+  max_tenants_per_worker: 50
+  rebalance_threshold: 0.2        # 20% imbalance triggers rebalance
+  min_rebalance_interval: 5m      # Minimum time between rebalances
+
+# Shared block watcher configuration
+block_watcher:
+  channel_buffer_size: 1000
+  max_blocks_per_fetch: 100
+  retry_attempts: 3
+  retry_delay_ms: 1000
+
+# API server configuration
+api:
+  host: "0.0.0.0"
+  port: 3001

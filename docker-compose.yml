@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: monitor_user
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: tenant_isolation
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../stellar-monitor-tenant-isolation/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Development instance of orchestrator in worker mode
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://monitor_user:changeme@postgres:5432/tenant_isolation
+      - REDIS_URL=redis://redis:6379
+      - RUST_LOG=info,oz_monitor_orchestrator=debug
+      - SERVICE_MODE=worker
+      - WORKER_ID=dev-worker-1
+    volumes:
+      - ./config.yaml:/etc/oz-monitor/config.yaml:ro
+    command: worker
+
+  # Development instance of shared block watcher
+  block-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://monitor_user:changeme@postgres:5432/tenant_isolation
+      - REDIS_URL=redis://redis:6379
+      - RUST_LOG=info,oz_monitor_orchestrator=debug
+      - SERVICE_MODE=block-watcher
+    volumes:
+      - ./config.yaml:/etc/oz-monitor/config.yaml:ro
+    command: block-watcher
+
+volumes:
+  postgres_data:
+  redis_data:
