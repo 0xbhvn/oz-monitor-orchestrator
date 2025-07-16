@@ -1,0 +1,75 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: oz-monitor-worker-hpa
+  namespace: oz-monitor-orchestrator
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: oz-monitor-workers
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+  # CPU-based scaling
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # Memory-based scaling
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  # Custom metrics (requires metrics server)
+  - type: Pods
+    pods:
+      metric:
+        name: tenant_count
+      target:
+        type: AverageValue
+        averageValue: "40"  # Target 40 tenants per pod
+  - type: Pods
+    pods:
+      metric:
+        name: rpc_rate_per_second
+      target:
+        type: AverageValue
+        averageValue: "100"  # Target 100 RPC/s per pod
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+      - type: Percent
+        value: 20  # Scale down max 20% at a time
+        periodSeconds: 60
+      - type: Pods
+        value: 2   # Scale down max 2 pods at a time
+        periodSeconds: 60
+      selectPolicy: Min  # Use the most conservative policy
+    scaleUp:
+      stabilizationWindowSeconds: 30   # Scale up quickly
+      policies:
+      - type: Percent
+        value: 100  # Can double the pods
+        periodSeconds: 60
+      - type: Pods
+        value: 5    # Add max 5 pods at a time
+        periodSeconds: 60
+      selectPolicy: Max  # Use the most aggressive policy
+---
+# PodDisruptionBudget to ensure availability during updates
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oz-monitor-worker-pdb
+  namespace: oz-monitor-orchestrator
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: oz-monitor-worker

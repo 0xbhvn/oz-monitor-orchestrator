@@ -1,0 +1,148 @@
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: oz-monitor-metrics
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: oz-monitor
+spec:
+  selector:
+    matchLabels:
+      app: oz-monitor-worker
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: block-watcher-metrics
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: oz-monitor
+spec:
+  selector:
+    matchLabels:
+      app: block-watcher
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+# Grafana Dashboard ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oz-monitor-dashboard
+  namespace: oz-monitor-orchestrator
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "title": "OZ Monitor Orchestrator",
+        "panels": [
+          {
+            "title": "Active Workers",
+            "targets": [
+              {
+                "expr": "count(up{job=\"oz-monitor-workers\"})"
+              }
+            ]
+          },
+          {
+            "title": "Tenants per Worker",
+            "targets": [
+              {
+                "expr": "oz_monitor_tenant_count"
+              }
+            ]
+          },
+          {
+            "title": "RPC Rate",
+            "targets": [
+              {
+                "expr": "rate(oz_monitor_rpc_calls_total[5m])"
+              }
+            ]
+          },
+          {
+            "title": "Block Processing Latency",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.99, oz_monitor_block_processing_duration_seconds_bucket)"
+              }
+            ]
+          },
+          {
+            "title": "Cache Hit Rate",
+            "targets": [
+              {
+                "expr": "rate(oz_monitor_cache_hits_total[5m]) / rate(oz_monitor_cache_requests_total[5m])"
+              }
+            ]
+          }
+        ]
+      }
+    }
+---
+# PrometheusRule for alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: oz-monitor-alerts
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: oz-monitor
+spec:
+  groups:
+  - name: oz-monitor
+    interval: 30s
+    rules:
+    - alert: WorkerDown
+      expr: up{job="oz-monitor-workers"} == 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Worker {{ $labels.instance }} is down"
+        description: "Worker has been down for more than 2 minutes"
+    
+    - alert: HighTenantLoad
+      expr: oz_monitor_tenant_count > 45
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Worker {{ $labels.instance }} has high tenant load"
+        description: "Worker has {{ $value }} tenants (threshold: 45)"
+    
+    - alert: HighRPCRate
+      expr: rate(oz_monitor_rpc_calls_total[5m]) > 200
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High RPC rate on {{ $labels.instance }}"
+        description: "RPC rate is {{ $value }} per second"
+    
+    - alert: LowCacheHitRate
+      expr: |
+        rate(oz_monitor_cache_hits_total[5m]) / 
+        rate(oz_monitor_cache_requests_total[5m]) < 0.5
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Low cache hit rate"
+        description: "Cache hit rate is {{ $value }} (below 50%)"
+    
+    - alert: BlockProcessingLag
+      expr: oz_monitor_blocks_behind > 100
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Block processing lag on network {{ $labels.network }}"
+        description: "{{ $value }} blocks behind latest"

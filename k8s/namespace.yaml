@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: oz-monitor-orchestrator
+  labels:
+    name: oz-monitor-orchestrator
+    app: oz-monitor

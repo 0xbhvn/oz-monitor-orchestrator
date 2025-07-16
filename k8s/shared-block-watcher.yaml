@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared-block-watcher
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: block-watcher
+spec:
+  replicas: 1  # Only one instance needed per network
+  selector:
+    matchLabels:
+      app: block-watcher
+  template:
+    metadata:
+      labels:
+        app: block-watcher
+    spec:
+      containers:
+      - name: watcher
+        image: oz-monitor-orchestrator:latest
+        imagePullPolicy: Always
+        command: ["/app/oz-monitor-orchestrator", "block-watcher"]
+        env:
+        - name: SERVICE_MODE
+          value: "block-watcher"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: url
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: RUST_LOG
+          value: "info,oz_monitor_orchestrator=debug"
+        - name: NETWORKS
+          value: "ethereum,polygon,stellar"  # Configure based on your needs
+        ports:
+        - containerPort: 3001
+          name: metrics
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: config
+          mountPath: /etc/oz-monitor
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: oz-monitor-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: block-watcher
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: block-watcher
+spec:
+  selector:
+    app: block-watcher
+  ports:
+  - port: 3001
+    targetPort: 3001
+    name: metrics

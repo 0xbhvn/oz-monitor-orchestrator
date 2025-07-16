@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oz-monitor-config
+  namespace: oz-monitor-orchestrator
+data:
+  config.yaml: |
+    # Orchestrator configuration
+    database_url: "postgresql://user:password@postgres:5432/tenant_isolation"
+    redis_url: "redis://redis:6379"
+    
+    # Worker configuration
+    worker:
+      max_tenants_per_worker: 50
+      health_check_interval: 30s
+      tenant_reload_interval: 300s
+    
+    # Block cache configuration
+    block_cache:
+      block_ttl: 60
+      latest_block_ttl: 5
+      key_prefix: "oz_cache"
+    
+    # Load balancer configuration
+    load_balancer:
+      strategy: "consistent_hashing"
+      max_tenants_per_worker: 50
+      rebalance_threshold: 0.2
+      min_rebalance_interval: 300s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oz-monitor-workers
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: oz-monitor-worker
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: oz-monitor-worker
+  template:
+    metadata:
+      labels:
+        app: oz-monitor-worker
+    spec:
+      containers:
+      - name: worker
+        image: oz-monitor-orchestrator:latest
+        imagePullPolicy: Always
+        env:
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: url
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: RUST_LOG
+          value: "info,oz_monitor_orchestrator=debug"
+        ports:
+        - containerPort: 3000
+          name: metrics
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: config
+          mountPath: /etc/oz-monitor
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: oz-monitor-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oz-monitor-workers
+  namespace: oz-monitor-orchestrator
+  labels:
+    app: oz-monitor-worker
+spec:
+  selector:
+    app: oz-monitor-worker
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: metrics
