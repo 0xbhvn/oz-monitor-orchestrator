@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                id, tenant_id, trigger_id, monitor_id, name, \n                type as \"trigger_type!\", \n                configuration, \n                is_active as \"is_active!\",\n                created_at as \"created_at!\", \n                updated_at as \"updated_at!\"\n            FROM tenant_triggers \n            WHERE tenant_id = ANY($1) AND is_active = true\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "trigger_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "monitor_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "trigger_type!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "configuration",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "479baac489b0719e195df97c6f294d68b94fadbe684029f5fdde74585113c0ab"
+}

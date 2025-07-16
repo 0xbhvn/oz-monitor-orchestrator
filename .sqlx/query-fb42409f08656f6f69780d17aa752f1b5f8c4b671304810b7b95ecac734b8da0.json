@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                m.id, m.tenant_id, m.monitor_id, m.name, \n                ARRAY[n.network_id]::TEXT[] as \"networks!\", \n                m.configuration, \n                m.is_active as \"is_active!\",\n                m.created_at as \"created_at!\",\n                m.updated_at as \"updated_at!\"\n            FROM tenant_monitors m\n            JOIN tenant_networks n ON m.network_id = n.id\n            WHERE m.tenant_id = ANY($1) AND m.is_active = true\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "monitor_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "networks!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "configuration",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "fb42409f08656f6f69780d17aa752f1b5f8c4b671304810b7b95ecac734b8da0"
+}
