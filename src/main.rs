@@ -57,7 +57,9 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = OrchestratorConfig::load().context("Failed to load configuration")?;
 
-    config.validate().map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
 
     info!("Starting OZ Monitor Orchestrator");
 
@@ -123,16 +125,45 @@ async fn run_worker(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> R
     load_balancer.add_worker(worker_id.clone()).await?;
 
     // Get initial tenant assignments
-    let assigned_tenants = load_balancer.get_worker_assignments(&worker_id).await?;
-    info!("Worker {} assigned {} tenants", worker_id, assigned_tenants.len());
+    let mut assigned_tenants = load_balancer.get_worker_assignments(&worker_id).await?;
+    
+    // If no tenants assigned and this is the first worker, assign all tenants
+    if assigned_tenants.is_empty() {
+        info!("No tenants assigned to worker, checking for unassigned tenants...");
+        let all_tenant_ids = get_all_tenant_ids(&db_pool).await?;
+        info!("Found {} tenants in database", all_tenant_ids.len());
+        
+        // Assign each tenant to this worker
+        for tenant_id in &all_tenant_ids {
+            match load_balancer.assign_tenant(*tenant_id).await {
+                Ok(assigned_worker_id) => {
+                    if assigned_worker_id == worker_id {
+                        assigned_tenants.push(*tenant_id);
+                        info!("Assigned tenant {} to worker {}", tenant_id, worker_id);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to assign tenant {} to worker: {}", tenant_id, e);
+                }
+            }
+        }
+    }
+    
+    info!(
+        "Worker {} assigned {} tenants",
+        worker_id,
+        assigned_tenants.len()
+    );
 
     // Create and start the worker
-    worker_pool.create_worker(
-        worker_id.clone(),
-        assigned_tenants,
-        block_watcher.clone(),
-        client_pool,
-    ).await?;
+    worker_pool
+        .create_worker(
+            worker_id.clone(),
+            assigned_tenants,
+            block_watcher.clone(),
+            client_pool,
+        )
+        .await?;
 
     info!("Worker started successfully");
     wait_for_shutdown().await;
@@ -154,7 +185,10 @@ async fn run_block_watcher(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool
     let client_pool = Arc::new(CachedClientPool::new(cache.clone()));
 
     // Initialize shared block watcher
-    let block_watcher = Arc::new(SharedBlockWatcher::new(cache.clone(), config.block_watcher.into()));
+    let block_watcher = Arc::new(SharedBlockWatcher::new(
+        cache.clone(),
+        config.block_watcher.into(),
+    ));
 
     // Initialize OZ Monitor services to get network configurations
     // In block watcher mode, we need all tenant IDs to get all networks
@@ -162,16 +196,16 @@ async fn run_block_watcher(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool
     let oz_services = Arc::new(
         OzMonitorServices::new(db_pool.clone(), all_tenant_ids.clone(), client_pool.clone())
             .await
-            .context("Failed to initialize OZ Monitor services")?
+            .context("Failed to initialize OZ Monitor services")?,
     );
 
     // Get all active networks from OZ services
     let active_networks = oz_services.get_active_networks().await?;
-    
+
     // Load network configurations from database
     let network_repo = TenantAwareNetworkRepository::new(db_pool.clone(), all_tenant_ids);
     let all_networks = network_repo.get_all();
-    
+
     // Add networks with active monitors to the block watcher
     for slug in active_networks {
         if let Some(network) = all_networks.get(&slug) {
@@ -192,12 +226,12 @@ async fn run_block_watcher(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool
 /// Get all tenant IDs from the database
 async fn get_all_tenant_ids(db_pool: &sqlx::PgPool) -> Result<Vec<uuid::Uuid>> {
     let tenant_ids = sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT DISTINCT tenant_id FROM tenant_monitors WHERE is_active = true"
+        "SELECT DISTINCT tenant_id FROM tenant_monitors WHERE is_active = true",
     )
     .fetch_all(db_pool)
     .await
     .context("Failed to fetch tenant IDs")?;
-    
+
     Ok(tenant_ids)
 }
 
@@ -221,29 +255,96 @@ async fn run_api(config: OrchestratorConfig, _db_pool: Arc<sqlx::PgPool>) -> Res
 async fn run_all(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> Result<()> {
     info!("Starting all services");
 
-    // In production, these would be separate processes
-    // For development, we can run them all in one process
+    // Initialize shared components
+    let cache = Arc::new(
+        BlockCacheService::new(&config.redis_url, config.block_cache.clone().into())
+            .await
+            .context("Failed to initialize block cache")?,
+    );
 
-    let worker_handle = tokio::spawn({
-        let config = config.clone();
-        let db_pool = db_pool.clone();
-        async move {
-            if let Err(e) = run_worker(config, db_pool).await {
-                error!("Worker failed: {}", e);
-            }
+    let client_pool = Arc::new(CachedClientPool::new(cache.clone()));
+
+    // Initialize shared block watcher
+    let block_watcher = Arc::new(SharedBlockWatcher::new(
+        cache.clone(),
+        config.block_watcher.clone().into(),
+    ));
+
+    // Initialize worker pool and load balancer
+    let worker_pool = MonitorWorkerPool::new(db_pool.clone(), cache.clone(), config.worker.clone().into());
+    let load_balancer = Arc::new(LoadBalancer::new(config.load_balancer.clone().into()));
+
+    // Get all tenant IDs and active networks
+    let all_tenant_ids = get_all_tenant_ids(&db_pool).await?;
+    let oz_services = Arc::new(
+        OzMonitorServices::new(db_pool.clone(), all_tenant_ids.clone(), client_pool.clone())
+            .await
+            .context("Failed to initialize OZ Monitor services")?,
+    );
+
+    let active_networks = oz_services.get_active_networks().await?;
+    let network_repo = TenantAwareNetworkRepository::new(db_pool.clone(), all_tenant_ids.clone());
+    let all_networks = network_repo.get_all();
+
+    // Add networks to block watcher
+    for slug in active_networks {
+        if let Some(network) = all_networks.get(&slug) {
+            block_watcher.add_network(network.clone()).await?;
+            info!("Added network {} to block watcher", slug);
         }
+    }
+
+    // Start block watcher
+    let block_watcher_for_spawn = block_watcher.clone();
+    let client_pool_for_spawn = client_pool.clone();
+    let block_watcher_handle = tokio::spawn(async move {
+        info!("Block watcher task spawned, calling start()");
+        match block_watcher_for_spawn.start(client_pool_for_spawn).await {
+            Ok(_) => {
+                info!("Block watcher start() completed successfully, now running...");
+                // Keep the block watcher running
+                if let Err(e) = block_watcher_for_spawn.run().await {
+                    error!("Block watcher run failed: {:?}", e);
+                }
+            }
+            Err(e) => error!("Block watcher start failed: {:?}", e),
+        }
+        info!("Block watcher task exiting");
     });
 
-    let block_watcher_handle = tokio::spawn({
-        let config = config.clone();
-        let db_pool = db_pool.clone();
-        async move {
-            if let Err(e) = run_block_watcher(config, db_pool).await {
-                error!("Block watcher failed: {}", e);
+    // Create and start worker
+    let worker_id = format!("worker-{}", uuid::Uuid::new_v4());
+    info!("Worker ID: {}", worker_id);
+    
+    load_balancer.add_worker(worker_id.clone()).await?;
+    
+    // Assign all tenants to this worker
+    let mut assigned_tenants = Vec::new();
+    for tenant_id in &all_tenant_ids {
+        match load_balancer.assign_tenant(*tenant_id).await {
+            Ok(assigned_worker_id) => {
+                if assigned_worker_id == worker_id {
+                    assigned_tenants.push(*tenant_id);
+                    info!("Assigned tenant {} to worker {}", tenant_id, worker_id);
+                }
+            }
+            Err(e) => {
+                error!("Failed to assign tenant {} to worker: {}", tenant_id, e);
             }
         }
-    });
+    }
 
+    // Create worker with shared block watcher
+    worker_pool
+        .create_worker(
+            worker_id.clone(),
+            assigned_tenants,
+            block_watcher.clone(),
+            client_pool.clone(),
+        )
+        .await?;
+
+    // Start API server
     let api_handle = tokio::spawn({
         let config = config.clone();
         let db_pool = db_pool.clone();
@@ -254,11 +355,15 @@ async fn run_all(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> Resu
         }
     });
 
+    info!("All services started successfully");
+
     // Wait for any service to fail
     tokio::select! {
-        _ = worker_handle => error!("Worker exited"),
         _ = block_watcher_handle => error!("Block watcher exited"),
         _ = api_handle => error!("API server exited"),
+        _ = signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down");
+        }
     }
 
     Ok(())

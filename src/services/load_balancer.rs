@@ -395,7 +395,7 @@ impl LoadBalancer {
     /// Get all tenant assignments for a specific worker
     pub async fn get_worker_assignments(&self, worker_id: &str) -> Result<Vec<Uuid>> {
         let assignments = self.assignments.read().await;
-        
+
         let tenant_ids: Vec<Uuid> = assignments
             .iter()
             .filter_map(|(tenant_id, assignment)| {
@@ -406,7 +406,7 @@ impl LoadBalancer {
                 }
             })
             .collect();
-        
+
         Ok(tenant_ids)
     }
 }
