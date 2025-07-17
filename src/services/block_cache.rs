@@ -207,4 +207,3 @@ impl<C: BlockChainClient + Send + Sync> BlockChainClient for CachedBlockClient<C
         self.inner_client.get_contract_spec(contract_id).await
     }
 }
-
