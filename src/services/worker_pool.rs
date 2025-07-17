@@ -11,17 +11,18 @@ use tokio::sync::RwLock;
 use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
-// Import OpenZeppelin Monitor types
-use openzeppelin_monitor::{
-    models::Monitor,
-    repositories::MonitorRepositoryTrait,
-    services::{
-        blockchain::ClientPoolTrait,
-    },
-};
+// // Import OpenZeppelin Monitor types
+// use openzeppelin_monitor::{
+//     models::{BlockType, Monitor, Network},
+//     services::blockchain::ClientPoolTrait,
+// };
 
-use crate::repositories::TenantAwareMonitorRepository;
-use crate::services::block_cache::BlockCacheService;
+use crate::services::{
+    block_cache::BlockCacheService,
+    cached_client_pool::CachedClientPool,
+    oz_monitor_integration::OzMonitorServices,
+    shared_block_watcher::{BlockEvent, SharedBlockWatcher},
+};
 
 /// Worker configuration
 #[derive(Debug, Clone)]
@@ -50,8 +51,10 @@ pub struct MonitorWorker {
     pub assigned_tenants: Arc<RwLock<Vec<Uuid>>>,
     pub status: Arc<RwLock<WorkerStatus>>,
     db: Arc<PgPool>,
-    cache: Arc<BlockCacheService>,
+    _cache: Arc<BlockCacheService>,
     config: WorkerConfig,
+    oz_services: Option<Arc<OzMonitorServices>>,
+    client_pool: Option<Arc<CachedClientPool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,8 +79,10 @@ impl MonitorWorker {
             assigned_tenants: Arc::new(RwLock::new(Vec::new())),
             status: Arc::new(RwLock::new(WorkerStatus::Starting)),
             db,
-            cache,
+            _cache: cache,
             config,
+            oz_services: None,
+            client_pool: None,
         }
     }
 
@@ -89,18 +94,46 @@ impl MonitorWorker {
     }
 
     /// Start the worker
-    #[instrument(skip(self, client_pool), fields(worker_id = %self.id))]
-    pub async fn start<CP: ClientPoolTrait + Send + Sync + 'static>(
-        &self,
-        client_pool: Arc<CP>,
+    #[instrument(skip(self, block_watcher, client_pool), fields(worker_id = %self.id))]
+    pub async fn start(
+        &mut self,
+        block_watcher: Arc<SharedBlockWatcher>,
+        client_pool: Arc<CachedClientPool>,
     ) -> Result<()> {
         *self.status.write().await = WorkerStatus::Running;
         info!("Starting worker {}", self.id);
 
+        // Initialize OZ Monitor services for assigned tenants
+        let tenant_ids = self.assigned_tenants.read().await.clone();
+        if tenant_ids.is_empty() {
+            warn!("Worker {} has no assigned tenants", self.id);
+            return Ok(());
+        }
+
+        // Store client pool
+        self.client_pool = Some(client_pool.clone());
+
+        let oz_services =
+            match OzMonitorServices::new(self.db.clone(), tenant_ids.clone(), client_pool).await {
+                Ok(services) => Arc::new(services),
+                Err(e) => {
+                    error!("Failed to initialize OZ Monitor services: {}", e);
+                    *self.status.write().await = WorkerStatus::Error(e.to_string());
+                    return Err(e);
+                }
+            };
+
+        self.oz_services = Some(oz_services.clone());
+
+        // Subscribe to block events
+        let block_receiver = block_watcher.subscribe();
+
         // Start background tasks
         let health_handle = self.start_health_check();
         let reload_handle = self.start_tenant_reload();
-        let monitor_handle = self.start_monitoring(client_pool).await?;
+        let monitor_handle = self
+            .start_monitoring_with_events(oz_services, block_receiver)
+            .await?;
 
         // Wait for any task to complete (they should run forever)
         tokio::select! {
@@ -147,57 +180,68 @@ impl MonitorWorker {
         })
     }
 
-    /// Start monitoring task
-    async fn start_monitoring<CP: ClientPoolTrait + Send + Sync + 'static>(
+    /// Start monitoring task with block events
+    async fn start_monitoring_with_events(
         &self,
-        client_pool: Arc<CP>,
+        oz_services: Arc<OzMonitorServices>,
+        mut block_receiver: tokio::sync::broadcast::Receiver<BlockEvent>,
     ) -> Result<tokio::task::JoinHandle<()>> {
         let tenants = self.assigned_tenants.clone();
-        let db = self.db.clone();
-        let cache = self.cache.clone();
         let worker_id = self.id.clone();
         let status = self.status.clone();
 
         let handle = tokio::spawn(async move {
             loop {
-                let tenant_ids = tenants.read().await.clone();
-                if tenant_ids.is_empty() {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                    continue;
-                }
+                // Wait for block events
+                match block_receiver.recv().await {
+                    Ok(block_event) => {
+                        let tenant_ids = tenants.read().await.clone();
+                        if tenant_ids.is_empty() {
+                            continue;
+                        }
 
-                info!(
-                    "Worker {} processing {} tenants",
-                    worker_id,
-                    tenant_ids.len()
-                );
+                        info!(
+                            "Worker {} processing {} blocks for network {} ({} tenants)",
+                            worker_id,
+                            block_event.blocks.len(),
+                            block_event.network.slug,
+                            tenant_ids.len()
+                        );
 
-                // Create repositories for these tenants
-                let monitor_repo =
-                    TenantAwareMonitorRepository::new(db.clone(), tenant_ids.clone());
-                let monitors = monitor_repo.get_all();
+                        // Process each block
+                        for block in block_event.blocks {
+                            match oz_services
+                                .process_block(&block_event.network, block, &tenant_ids)
+                                .await
+                            {
+                                Ok(results) => {
+                                    let total_matches = results.len();
 
-                if monitors.is_empty() {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                    continue;
-                }
-
-                // Process each monitor
-                for (name, monitor) in monitors {
-                    match process_monitor(&monitor, &cache, &client_pool).await {
-                        Ok(_) => info!("Worker {} processed monitor {}", worker_id, name),
-                        Err(e) => {
-                            error!(
-                                "Worker {} failed to process monitor {}: {}",
-                                worker_id, name, e
-                            );
-                            *status.write().await = WorkerStatus::Error(e.to_string());
+                                    if total_matches > 0 {
+                                        info!(
+                                            "Worker {} found {} matches on network {}",
+                                            worker_id, total_matches, block_event.network.slug
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Worker {} failed to process block on network {}: {}",
+                                        worker_id, block_event.network.slug, e
+                                    );
+                                    *status.write().await = WorkerStatus::Error(e.to_string());
+                                }
+                            }
                         }
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("Worker {} lagged behind by {} messages", worker_id, skipped);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("Block event channel closed, stopping worker {}", worker_id);
+                        break;
+                    }
                 }
-
-                // Sleep before next iteration
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
             }
         });
 
@@ -205,38 +249,11 @@ impl MonitorWorker {
     }
 }
 
-/// Process a single monitor
-async fn process_monitor<CP: ClientPoolTrait>(
-    monitor: &Monitor,
-    _cache: &Arc<BlockCacheService>,
-    _client_pool: &Arc<CP>,
-) -> Result<()> {
-    // This is a simplified version - in reality you'd integrate with OZ monitor's
-    // full processing pipeline
-    info!("Processing monitor: {}", monitor.name);
-
-    // Process each network the monitor is configured for
-    for network_slug in &monitor.networks {
-        info!(
-            "Processing network {} for monitor {}",
-            network_slug, monitor.name
-        );
-
-        // In a real implementation, you'd:
-        // 1. Get the network configuration
-        // 2. Create a cached client for the network
-        // 3. Use OZ monitor's filter service to process blocks
-        // 4. Send notifications for matches
-    }
-
-    Ok(())
-}
-
 /// Monitor worker pool manager
 pub struct MonitorWorkerPool {
-    workers: Arc<RwLock<HashMap<String, Arc<MonitorWorker>>>>,
+    workers: Arc<RwLock<HashMap<String, Arc<RwLock<MonitorWorker>>>>>,
     db: Arc<PgPool>,
-    cache: Arc<BlockCacheService>,
+    _cache: Arc<BlockCacheService>,
     config: WorkerConfig,
 }
 
@@ -245,37 +262,39 @@ impl MonitorWorkerPool {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             db,
-            cache,
+            _cache: cache,
             config,
         }
     }
 
     /// Create and start a new worker
-    pub async fn create_worker<CP: ClientPoolTrait + Send + Sync + 'static>(
+    pub async fn create_worker(
         &self,
         worker_id: String,
         tenant_ids: Vec<Uuid>,
-        client_pool: Arc<CP>,
+        block_watcher: Arc<SharedBlockWatcher>,
+        client_pool: Arc<CachedClientPool>,
     ) -> Result<()> {
-        let worker = Arc::new(MonitorWorker::new(
+        let worker = MonitorWorker::new(
             worker_id.clone(),
             self.db.clone(),
-            self.cache.clone(),
+            self._cache.clone(),
             self.config.clone(),
-        ));
+        );
 
         worker.assign_tenants(tenant_ids).await;
 
         // Add to pool
+        let worker_arc = Arc::new(RwLock::new(worker));
         self.workers
             .write()
             .await
-            .insert(worker_id.clone(), worker.clone());
+            .insert(worker_id.clone(), worker_arc.clone());
 
         // Start worker in background
-        let worker_clone = worker.clone();
         tokio::spawn(async move {
-            if let Err(e) = worker_clone.start(client_pool).await {
+            let mut worker_lock = worker_arc.write().await;
+            if let Err(e) = worker_lock.start(block_watcher, client_pool).await {
                 error!("Worker failed to start: {}", e);
             }
         });
@@ -287,7 +306,9 @@ impl MonitorWorkerPool {
     pub async fn get_worker_status(&self, worker_id: &str) -> Option<WorkerStatus> {
         let workers = self.workers.read().await;
         if let Some(worker) = workers.get(worker_id) {
-            Some(worker.status.read().await.clone())
+            let worker_lock = worker.read().await;
+            let status = worker_lock.status.read().await.clone();
+            Some(status)
         } else {
             None
         }
@@ -299,8 +320,9 @@ impl MonitorWorkerPool {
         let mut result = Vec::new();
 
         for (id, worker) in workers.iter() {
-            let status = worker.status.read().await.clone();
-            let tenant_count = worker.assigned_tenants.read().await.len();
+            let worker_lock = worker.read().await;
+            let status = worker_lock.status.read().await.clone();
+            let tenant_count = worker_lock.assigned_tenants.read().await.len();
             result.push((id.clone(), status, tenant_count));
         }
 
@@ -311,7 +333,14 @@ impl MonitorWorkerPool {
     pub async fn reassign_tenants(&self, worker_id: &str, tenant_ids: Vec<Uuid>) -> Result<()> {
         let workers = self.workers.read().await;
         if let Some(worker) = workers.get(worker_id) {
-            worker.assign_tenants(tenant_ids).await;
+            let worker_lock = worker.read().await;
+            worker_lock.assign_tenants(tenant_ids.clone()).await;
+
+            // Reload OZ Monitor services with new tenant list if worker is running
+            if let Some(oz_services) = &worker_lock.oz_services {
+                oz_services.reload_configurations(&tenant_ids).await?;
+            }
+
             Ok(())
         } else {
             anyhow::bail!("Worker {} not found", worker_id)
@@ -322,7 +351,8 @@ impl MonitorWorkerPool {
     pub async fn remove_worker(&self, worker_id: &str) -> Result<()> {
         let mut workers = self.workers.write().await;
         if let Some(worker) = workers.remove(worker_id) {
-            *worker.status.write().await = WorkerStatus::Stopping;
+            let worker_lock = worker.write().await;
+            *worker_lock.status.write().await = WorkerStatus::Stopping;
             Ok(())
         } else {
             anyhow::bail!("Worker {} not found", worker_id)
