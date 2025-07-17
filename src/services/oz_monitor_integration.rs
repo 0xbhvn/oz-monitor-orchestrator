@@ -15,8 +15,7 @@ use uuid::Uuid;
 // Import OpenZeppelin Monitor types and services
 use openzeppelin_monitor::{
     models::{
-        BlockType, ContractSpec, EVMBlock, Monitor, MonitorMatch, Network,
-        StellarBlock, Trigger,
+        BlockType, ContractSpec, EVMBlock, Monitor, MonitorMatch, Network, StellarBlock, Trigger,
     },
     repositories::{
         MonitorRepositoryTrait, NetworkRepositoryTrait, TriggerRepositoryTrait, TriggerService,
@@ -38,29 +37,32 @@ use crate::services::cached_client_pool::CachedClientPool;
 pub struct OzMonitorServices {
     /// Filter service for evaluating blockchain data against monitor conditions
     filter_service: Arc<FilterService>,
-    
+
     /// Trigger execution service for processing matches
     trigger_execution_service: Arc<TriggerExecutionService<TenantAwareTriggerRepository>>,
-    
+
     /// Client pool for blockchain connections
     client_pool: Arc<CachedClientPool>,
-    
+
     /// Tenant-aware repositories
     monitor_repo: Arc<TenantAwareMonitorRepository>,
     network_repo: Arc<TenantAwareNetworkRepository>,
     trigger_repo: Arc<TenantAwareTriggerRepository>,
-    
+
     /// Cache for active monitors by tenant
     monitor_cache: Arc<DashMap<Uuid, HashMap<String, Monitor>>>,
-    
+
     /// Cache for trigger scripts
     _trigger_script_cache: Arc<DashMap<String, String>>,
-    
+
     /// Cache for contract specs
     contract_spec_cache: Arc<DashMap<String, ContractSpec>>,
-    
+
     /// Database connection pool
     _db: Arc<PgPool>,
+
+    /// Tenant IDs this service instance is responsible for
+    tenant_ids: Vec<Uuid>,
 }
 
 impl OzMonitorServices {
@@ -91,12 +93,11 @@ impl OzMonitorServices {
 
         // Initialize OZ Monitor services
         let filter_service = Arc::new(FilterService::new());
-        
+
         // Create TriggerService from repository - dereference the Arc
-        let trigger_service = TriggerService::new_with_repository(
-            (*trigger_repo).clone()
-        ).map_err(|e| anyhow::anyhow!("Failed to create trigger service: {}", e))?;
-        
+        let trigger_service = TriggerService::new_with_repository((*trigger_repo).clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create trigger service: {}", e))?;
+
         // Create NotificationService
         let notification_service = NotificationService::new();
 
@@ -116,6 +117,7 @@ impl OzMonitorServices {
             _trigger_script_cache: Arc::new(DashMap::new()),
             contract_spec_cache: Arc::new(DashMap::new()),
             _db: db,
+            tenant_ids,
         })
     }
 
@@ -136,7 +138,7 @@ impl OzMonitorServices {
         // Process block for each tenant
         for tenant_id in tenant_ids {
             let context = self.get_tenant_context(*tenant_id).await?;
-            
+
             match &block_wrapper {
                 BlockWrapper::Ethereum(eth_block) => {
                     let matches = self
@@ -170,14 +172,19 @@ impl OzMonitorServices {
         let monitors_vec: Vec<Monitor> = monitors.values().cloned().collect();
 
         // Get the EVM client for this network
-        let client = self.client_pool.get_evm_client(network).await
+        let client = self
+            .client_pool
+            .get_evm_client(network)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get EVM client: {}", e))?;
 
         // Convert to BlockType for the filter service
         let block_type = BlockType::EVM(Box::new(block.clone()));
 
         // Get contract specs for this tenant
-        let contract_specs = self.get_contract_specs_for_monitors(&monitors_vec, network).await?;
+        let contract_specs = self
+            .get_contract_specs_for_monitors(&monitors_vec, network)
+            .await?;
 
         // Use OZ Monitor's filter service to process the entire block
         let filter_results = self
@@ -207,7 +214,7 @@ impl OzMonitorServices {
                     continue;
                 }
             };
-            
+
             if let Some((monitor_name, monitor)) = monitors.iter().find(|(_, m)| {
                 // Match based on monitor configuration
                 m.addresses.iter().any(|addr| {
@@ -216,7 +223,10 @@ impl OzMonitorServices {
                 })
             }) {
                 // Check trigger conditions
-                if self.evaluate_trigger_conditions(monitor, &monitor_match).await? {
+                if self
+                    .evaluate_trigger_conditions(monitor, &monitor_match)
+                    .await?
+                {
                     all_matches.push(TenantMonitorMatch {
                         tenant_id: context.tenant_id,
                         monitor_name: monitor_name.clone(),
@@ -243,14 +253,19 @@ impl OzMonitorServices {
         let monitors_vec: Vec<Monitor> = monitors.values().cloned().collect();
 
         // Get the Stellar client for this network
-        let client = self.client_pool.get_stellar_client(network).await
+        let client = self
+            .client_pool
+            .get_stellar_client(network)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get Stellar client: {}", e))?;
 
         // Convert to BlockType for the filter service
         let block_type = BlockType::Stellar(Box::new(block.clone()));
 
         // Get contract specs for this tenant
-        let contract_specs = self.get_contract_specs_for_monitors(&monitors_vec, network).await?;
+        let contract_specs = self
+            .get_contract_specs_for_monitors(&monitors_vec, network)
+            .await?;
 
         // Use OZ Monitor's filter service to process the entire block
         let filter_results = self
@@ -267,29 +282,40 @@ impl OzMonitorServices {
 
         // Process each match
         for monitor_match in filter_results {
-            // Find which monitor produced this match
-            let monitor_address = match &monitor_match {
-                MonitorMatch::EVM(evm_match) => {
-                    match &evm_match.transaction.to {
-                        Some(addr) => addr,
-                        None => continue, // Skip contract creation transactions
+            // For Stellar, extract the contract address from the matched_on_args
+            let contract_address = match &monitor_match {
+                MonitorMatch::Stellar(stellar_match) => {
+                    // Try to get contract address from matched function arguments
+                    if let Some(matched_args) = &stellar_match.matched_on_args {
+                        if let Some(_functions) = &matched_args.functions {
+                            // For Stellar, the contract address is usually part of the transaction
+                            // We need to extract it from the transaction operations
+                            self.extract_stellar_contract_address(stellar_match)?
+                        } else {
+                            continue; // No function matches
+                        }
+                    } else {
+                        continue; // No matched args
                     }
                 }
-                MonitorMatch::Stellar(_) => {
-                    // Stellar matches don't have a simple address field
-                    continue;
+                MonitorMatch::EVM(_) => {
+                    continue; // This is Stellar block processing
                 }
             };
-            
+
+            // Find which monitor produced this match
             if let Some((monitor_name, monitor)) = monitors.iter().find(|(_, m)| {
                 // Match based on monitor configuration
                 m.addresses.iter().any(|addr| {
-                    // Compare addresses as strings
-                    format!("{:?}", monitor_address).eq_ignore_ascii_case(&addr.address)
+                    // Compare Stellar addresses (case-insensitive)
+                    addr.address.eq_ignore_ascii_case(&contract_address)
                 })
             }) {
                 // Check trigger conditions
-                if self.evaluate_trigger_conditions(monitor, &monitor_match).await? {
+                if self
+                    .evaluate_trigger_conditions(monitor, &monitor_match)
+                    .await?
+                {
                     all_matches.push(TenantMonitorMatch {
                         tenant_id: context.tenant_id,
                         monitor_name: monitor_name.clone(),
@@ -302,40 +328,137 @@ impl OzMonitorServices {
         Ok(all_matches)
     }
 
+    /// Extract contract address from Stellar monitor match
+    fn extract_stellar_contract_address(
+        &self,
+        stellar_match: &openzeppelin_monitor::models::StellarMonitorMatch,
+    ) -> Result<String> {
+        // First, check if we have a contract address in the monitor configuration
+        if let Some(addr) = stellar_match.monitor.addresses.first() {
+            return Ok(addr.address.clone());
+        }
+
+        // Try to extract from transaction envelope
+        if let Some(envelope_json) = &stellar_match.transaction.envelope_json {
+            if let Some(tx) = envelope_json.get("tx") {
+                if let Some(operations) = tx.get("operations") {
+                    if let Some(ops_array) = operations.as_array() {
+                        for op in ops_array {
+                            if let Some(op_type) = op.get("type").and_then(|t| t.as_str()) {
+                                if op_type == "invokeHostFunction" {
+                                    // For contract invocations, the contract address might be in the function parameters
+                                    if let Some(host_func) = op.get("hostFunction") {
+                                        if let Some(contract_id) =
+                                            host_func.get("contractId").and_then(|c| c.as_str())
+                                        {
+                                            return Ok(contract_id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Could not extract contract address from Stellar transaction"
+        ))
+    }
+
     /// Evaluate trigger conditions for a monitor match
     async fn evaluate_trigger_conditions(
         &self,
         monitor: &Monitor,
-        _monitor_match: &MonitorMatch,
+        monitor_match: &MonitorMatch,
     ) -> Result<bool> {
         // If no trigger conditions, include the match
         if monitor.trigger_conditions.is_empty() {
             return Ok(true);
         }
 
-        // TODO: Implement trigger condition evaluation
-        // For now, just check if conditions exist and include all matches
+        // Evaluate all trigger conditions - ALL must return true for the match to be included
+        for condition in &monitor.trigger_conditions {
+            // Check if we have the script cached
+            let script_content =
+                if let Some(script) = self._trigger_script_cache.get(&condition.script_path) {
+                    script.clone()
+                } else {
+                    // Load from database using script_path as the script name
+                    match self.load_script_from_database(&condition.script_path).await {
+                        Ok(content) => {
+                            self._trigger_script_cache
+                                .insert(condition.script_path.clone(), content.clone());
+                            content
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to load trigger script {}: {}. Including match by default.",
+                                condition.script_path, e
+                            );
+                            // If we can't load the script, include the match by default for safety
+                            return Ok(true);
+                        }
+                    }
+                };
+
+            // Create script executor based on language
+            use openzeppelin_monitor::services::trigger::ScriptExecutorFactory;
+
+            let executor = ScriptExecutorFactory::create(&condition.language, &script_content);
+
+            // Execute the script with timeout
+            let timeout_ms = condition.timeout_ms; // timeout_ms is already a u32 in TriggerCondition
+
+            match executor
+                .execute(
+                    monitor_match.clone(),
+                    &timeout_ms,
+                    condition.arguments.as_deref(),
+                    false, // Not from custom notification
+                )
+                .await
+            {
+                Ok(result) => {
+                    if !result {
+                        // If any condition returns false, exclude the match
+                        return Ok(false);
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Error executing trigger condition script {}: {}. Including match by default.",
+                        condition.script_path, e
+                    );
+                    // On error, include the match by default for safety
+                    return Ok(true);
+                }
+            }
+        }
+
+        // All conditions returned true
         Ok(true)
     }
 
     /// Execute triggers for a monitor match
-    pub async fn execute_triggers(
-        &self,
-        tenant_match: &TenantMonitorMatch,
-    ) -> Result<()> {
+    pub async fn execute_triggers(&self, tenant_match: &TenantMonitorMatch) -> Result<()> {
         let context = self.get_tenant_context(tenant_match.tenant_id).await?;
         let monitor = context.get_monitor(&tenant_match.monitor_name)?;
 
         // Prepare trigger scripts (empty for now)
         let trigger_scripts = HashMap::new();
-        
+
         // Prepare variables for trigger execution
         let mut variables = HashMap::new();
         variables.insert("monitor_name".to_string(), monitor.name.clone());
-        variables.insert("network".to_string(), match &tenant_match.monitor_match {
-            MonitorMatch::EVM(evm_match) => evm_match.network_slug.clone(),
-            MonitorMatch::Stellar(stellar_match) => stellar_match.network_slug.clone(),
-        });
+        variables.insert(
+            "network".to_string(),
+            match &tenant_match.monitor_match {
+                MonitorMatch::EVM(evm_match) => evm_match.network_slug.clone(),
+                MonitorMatch::Stellar(stellar_match) => stellar_match.network_slug.clone(),
+            },
+        );
 
         // Execute triggers
         let result = self
@@ -389,41 +512,92 @@ impl OzMonitorServices {
     /// Load monitors for a tenant
     async fn load_tenant_monitors(&self, tenant_id: Uuid) -> Result<HashMap<String, Monitor>> {
         // Update repository tenant filter
-        self.monitor_repo.update_tenant_filter(vec![tenant_id]).await;
-        
+        self.monitor_repo
+            .update_tenant_filter(vec![tenant_id])
+            .await;
+
         // Load all monitors
         Ok(self.monitor_repo.get_all())
     }
 
     /// Load networks for a tenant
     async fn load_tenant_networks(&self, tenant_id: Uuid) -> Result<HashMap<String, Network>> {
-        self.network_repo.update_tenant_filter(vec![tenant_id]).await;
+        self.network_repo
+            .update_tenant_filter(vec![tenant_id])
+            .await;
         Ok(self.network_repo.get_all())
     }
 
     /// Load triggers for a tenant
     async fn load_tenant_triggers(&self, tenant_id: Uuid) -> Result<HashMap<String, Trigger>> {
-        self.trigger_repo.update_tenant_filter(vec![tenant_id]).await;
+        self.trigger_repo
+            .update_tenant_filter(vec![tenant_id])
+            .await;
         Ok(self.trigger_repo.get_all())
     }
 
-    /// Get cached trigger script
-    #[allow(dead_code)]
-    async fn _get_trigger_script(&self, script_path: &str) -> Result<Option<String>> {
-        // Check cache first
-        if let Some(script) = self._trigger_script_cache.get(script_path) {
-            return Ok(Some(script.clone()));
+    /// Load script from database by name
+    async fn load_script_from_database(&self, script_name: &str) -> Result<String> {
+        // Extract script name from path if it's a full path
+        let name = if script_name.contains('/') {
+            script_name
+                .split('/')
+                .last()
+                .unwrap_or(script_name)
+                .trim_end_matches(".py")
+                .trim_end_matches(".js")
+                .trim_end_matches(".sh")
+        } else {
+            script_name
+        };
+
+        // Query database for script
+        #[derive(sqlx::FromRow)]
+        struct ScriptRow {
+            content: String,
         }
 
-        // Load from file system (in production, this might load from S3 or database)
-        match tokio::fs::read_to_string(script_path).await {
-            Ok(script) => {
-                self._trigger_script_cache
-                    .insert(script_path.to_string(), script.clone());
-                Ok(Some(script))
+        let result = sqlx::query_as::<_, ScriptRow>(
+            r#"
+            SELECT content
+            FROM trigger_scripts
+            WHERE name = $1 
+                AND tenant_id = ANY($2)
+                AND is_active = true
+            LIMIT 1
+            "#,
+        )
+        .bind(name)
+        .bind(self.tenant_filter())
+        .fetch_optional(&*self._db)
+        .await?;
+
+        match result {
+            Some(row) => Ok(row.content),
+            None => {
+                // Fallback to filesystem for backward compatibility
+                // This allows gradual migration of scripts to database
+                match tokio::fs::read_to_string(script_name).await {
+                    Ok(content) => {
+                        info!(
+                            "Script {} not found in database, loaded from filesystem. Consider migrating to database.",
+                            script_name
+                        );
+                        Ok(content)
+                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Script {} not found in database or filesystem: {}",
+                        name,
+                        e
+                    )),
+                }
             }
-            Err(_) => Ok(None),
         }
+    }
+
+    /// Get tenant filter
+    fn tenant_filter(&self) -> &[Uuid] {
+        &self.tenant_ids
     }
 
     /// Reload configuration for specific tenants
@@ -436,9 +610,15 @@ impl OzMonitorServices {
         }
 
         // Update repository filters
-        self.monitor_repo.update_tenant_filter(tenant_ids.to_vec()).await;
-        self.network_repo.update_tenant_filter(tenant_ids.to_vec()).await;
-        self.trigger_repo.update_tenant_filter(tenant_ids.to_vec()).await;
+        self.monitor_repo
+            .update_tenant_filter(tenant_ids.to_vec())
+            .await;
+        self.network_repo
+            .update_tenant_filter(tenant_ids.to_vec())
+            .await;
+        self.trigger_repo
+            .update_tenant_filter(tenant_ids.to_vec())
+            .await;
 
         Ok(())
     }
