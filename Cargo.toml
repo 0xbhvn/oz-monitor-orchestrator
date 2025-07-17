@@ -42,6 +42,9 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
+# Concurrent data structures
+dashmap = "6.1"
+
 # Metrics
 prometheus = "0.13"
 
