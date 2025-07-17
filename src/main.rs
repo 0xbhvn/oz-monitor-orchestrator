@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use openzeppelin_monitor::repositories::NetworkRepositoryTrait;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
@@ -12,8 +13,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use oz_monitor_orchestrator::{
     config::{OrchestratorConfig, ServiceMode},
+    repositories::TenantAwareNetworkRepository,
     services::{
-        block_cache::BlockCacheService, load_balancer::LoadBalancer,
+        block_cache::BlockCacheService, cached_client_pool::CachedClientPool,
+        load_balancer::LoadBalancer, oz_monitor_integration::OzMonitorServices,
         shared_block_watcher::SharedBlockWatcher, worker_pool::MonitorWorkerPool,
     },
 };
@@ -95,8 +98,17 @@ async fn run_worker(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> R
             .context("Failed to initialize block cache")?,
     );
 
+    // Initialize cached client pool
+    let client_pool = Arc::new(CachedClientPool::new(cache.clone()));
+
+    // Initialize shared block watcher to receive block events
+    let block_watcher = Arc::new(SharedBlockWatcher::new(
+        cache.clone(),
+        config.block_watcher.into(),
+    ));
+
     // Initialize worker pool
-    let _worker_pool = MonitorWorkerPool::new(db_pool.clone(), cache.clone(), config.worker.into());
+    let worker_pool = MonitorWorkerPool::new(db_pool.clone(), cache.clone(), config.worker.into());
 
     // Initialize load balancer
     let load_balancer = Arc::new(LoadBalancer::new(config.load_balancer.into()));
@@ -110,20 +122,25 @@ async fn run_worker(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> R
     // Register with load balancer
     load_balancer.add_worker(worker_id.clone()).await?;
 
-    // TODO: In a real implementation, you would:
-    // 1. Connect to the shared block watcher
-    // 2. Get tenant assignments from load balancer
-    // 3. Initialize OpenZeppelin monitor client pool
-    // 4. Start processing assigned tenants
+    // Get initial tenant assignments
+    let assigned_tenants = load_balancer.get_worker_assignments(&worker_id).await?;
+    info!("Worker {} assigned {} tenants", worker_id, assigned_tenants.len());
 
-    // For now, just wait for shutdown
+    // Create and start the worker
+    worker_pool.create_worker(
+        worker_id.clone(),
+        assigned_tenants,
+        block_watcher.clone(),
+        client_pool,
+    ).await?;
+
     info!("Worker started successfully");
     wait_for_shutdown().await;
 
     Ok(())
 }
 
-async fn run_block_watcher(config: OrchestratorConfig, _db_pool: Arc<sqlx::PgPool>) -> Result<()> {
+async fn run_block_watcher(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> Result<()> {
     info!("Starting in Block Watcher mode");
 
     // Initialize block cache
@@ -133,19 +150,55 @@ async fn run_block_watcher(config: OrchestratorConfig, _db_pool: Arc<sqlx::PgPoo
             .context("Failed to initialize block cache")?,
     );
 
-    // Initialize shared block watcher
-    let _block_watcher = SharedBlockWatcher::new(cache.clone(), config.block_watcher.into());
+    // Initialize cached client pool
+    let client_pool = Arc::new(CachedClientPool::new(cache.clone()));
 
-    // TODO: In a real implementation, you would:
-    // 1. Load network configurations from database
-    // 2. Initialize OpenZeppelin monitor client pool
-    // 3. Add networks to the block watcher
-    // 4. Start watching blocks
+    // Initialize shared block watcher
+    let block_watcher = Arc::new(SharedBlockWatcher::new(cache.clone(), config.block_watcher.into()));
+
+    // Initialize OZ Monitor services to get network configurations
+    // In block watcher mode, we need all tenant IDs to get all networks
+    let all_tenant_ids = get_all_tenant_ids(&db_pool).await?;
+    let oz_services = Arc::new(
+        OzMonitorServices::new(db_pool.clone(), all_tenant_ids.clone(), client_pool.clone())
+            .await
+            .context("Failed to initialize OZ Monitor services")?
+    );
+
+    // Get all active networks from OZ services
+    let active_networks = oz_services.get_active_networks().await?;
+    
+    // Load network configurations from database
+    let network_repo = TenantAwareNetworkRepository::new(db_pool.clone(), all_tenant_ids);
+    let all_networks = network_repo.get_all();
+    
+    // Add networks with active monitors to the block watcher
+    for slug in active_networks {
+        if let Some(network) = all_networks.get(&slug) {
+            block_watcher.add_network(network.clone()).await?;
+            info!("Added network {} to block watcher", slug);
+        }
+    }
+
+    // Start watching blocks
+    block_watcher.start(client_pool).await?;
 
     info!("Block watcher started successfully");
     wait_for_shutdown().await;
 
     Ok(())
+}
+
+/// Get all tenant IDs from the database
+async fn get_all_tenant_ids(db_pool: &sqlx::PgPool) -> Result<Vec<uuid::Uuid>> {
+    let tenant_ids = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT DISTINCT tenant_id FROM tenant_monitors WHERE is_active = true"
+    )
+    .fetch_all(db_pool)
+    .await
+    .context("Failed to fetch tenant IDs")?;
+    
+    Ok(tenant_ids)
 }
 
 async fn run_api(config: OrchestratorConfig, _db_pool: Arc<sqlx::PgPool>) -> Result<()> {
