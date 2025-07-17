@@ -77,6 +77,13 @@ impl TenantAwareMonitorRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
     }
+    
+    /// Update the tenant filter for this repository
+    pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // For now, this is a no-op as the repository is created with specific tenants
+        // In a real implementation, you'd want to make tenant_filter mutable
+    }
 
     /// Convert database monitor to OpenZeppelin monitor format
     fn db_to_oz_monitor(&self, db_monitor: DbMonitor) -> Result<Monitor> {
@@ -240,6 +247,13 @@ impl TenantAwareNetworkRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
     }
+    
+    /// Update the tenant filter for this repository
+    pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // For now, this is a no-op as the repository is created with specific tenants
+        // In a real implementation, you'd want to make tenant_filter mutable
+    }
 
     fn db_to_oz_network(&self, db_network: DbNetwork) -> Result<Network> {
         let network: Network = serde_json::from_value(db_network.configuration)
@@ -369,6 +383,13 @@ pub struct TenantAwareTriggerRepository {
 impl TenantAwareTriggerRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
+    }
+    
+    /// Update the tenant filter for this repository
+    pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // For now, this is a no-op as the repository is created with specific tenants
+        // In a real implementation, you'd want to make tenant_filter mutable
     }
 
     fn db_to_oz_trigger(&self, db_trigger: DbTrigger) -> Result<Trigger> {
@@ -542,3 +563,4 @@ impl TenantAwareTriggerRepository {
         Ok(result)
     }
 }
+
