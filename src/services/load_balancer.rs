@@ -391,4 +391,22 @@ impl LoadBalancer {
         // Low activity tenants use consistent hashing for affinity
         self.consistent_hash_assignment(tenant_id).await
     }
+
+    /// Get all tenant assignments for a specific worker
+    pub async fn get_worker_assignments(&self, worker_id: &str) -> Result<Vec<Uuid>> {
+        let assignments = self.assignments.read().await;
+        
+        let tenant_ids: Vec<Uuid> = assignments
+            .iter()
+            .filter_map(|(tenant_id, assignment)| {
+                if assignment.worker_id == worker_id {
+                    Some(*tenant_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        Ok(tenant_ids)
+    }
 }
