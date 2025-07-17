@@ -130,17 +130,20 @@ impl SharedBlockWatcher {
         let networks_to_start: Vec<(String, Network)> = {
             let networks = self.networks.read().await;
             info!("Found {} networks to watch", networks.len());
-            
+
             networks
                 .iter()
                 .filter(|(slug, state)| {
-                    info!("Checking network {} (is_running: {})", slug, state.is_running);
+                    info!(
+                        "Checking network {} (is_running: {})",
+                        slug, state.is_running
+                    );
                     !state.is_running
                 })
                 .map(|(slug, state)| (slug.clone(), state.network.clone()))
                 .collect()
         };
-        
+
         let mut started_count = 0;
 
         // Start a watcher task for each network
@@ -158,7 +161,10 @@ impl SharedBlockWatcher {
                     started_count += 1;
                 }
                 Err(e) => {
-                    error!("Failed to start watcher for network {}: {:?}", network_slug, e);
+                    error!(
+                        "Failed to start watcher for network {}: {:?}",
+                        network_slug, e
+                    );
                     return Err(e);
                 }
             }
@@ -171,35 +177,35 @@ impl SharedBlockWatcher {
     /// Run the block watcher - this method keeps the watcher alive
     pub async fn run(&self) -> Result<()> {
         info!("SharedBlockWatcher::run() - keeping block watcher alive");
-        
+
         // Give spawned tasks a moment to start
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        
+
         // Wait for all watcher tasks to complete (they run forever unless stopped)
         let handles = self.watcher_handles.read().await;
         if handles.is_empty() {
             warn!("No network watcher tasks to wait for");
             return Ok(());
         }
-        
+
         info!("Waiting for {} network watcher tasks", handles.len());
-        
+
         // This will block forever unless the tasks are cancelled
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            
+
             // Check if watchers are still running
             let handles = self.watcher_handles.read().await;
             let running_count = handles.iter().filter(|h| !h.is_finished()).count();
-            
+
             if running_count == 0 {
                 warn!("All network watchers have stopped");
                 break;
             }
-            
+
             debug!("{} network watchers still running", running_count);
         }
-        
+
         Ok(())
     }
 
@@ -217,7 +223,7 @@ impl SharedBlockWatcher {
         let network_slug_for_log = network_slug.clone();
 
         info!("About to mark network {} as running", network_slug_for_log);
-        
+
         // Mark as running
         {
             let mut networks_lock = networks.write().await;
@@ -228,13 +234,19 @@ impl SharedBlockWatcher {
         }
 
         info!("About to spawn task for network {}", network_slug_for_log);
-        
+
         let handle = tokio::spawn(async move {
-            info!("[SPAWNED TASK] Starting watcher for network {}", network_slug);
-            
+            info!(
+                "[SPAWNED TASK] Starting watcher for network {}",
+                network_slug
+            );
+
             // Add a small delay to ensure the task actually starts
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            info!("[SPAWNED TASK] Task is now running for network {}", network_slug);
+            info!(
+                "[SPAWNED TASK] Task is now running for network {}",
+                network_slug
+            );
 
             loop {
                 // Check if we should continue
@@ -252,7 +264,10 @@ impl SharedBlockWatcher {
                 }
 
                 // Fetch and process blocks
-                info!("[SPAWNED TASK] About to fetch blocks for network {}", network_slug);
+                info!(
+                    "[SPAWNED TASK] About to fetch blocks for network {}",
+                    network_slug
+                );
                 match fetch_and_broadcast_blocks(
                     &network,
                     &networks,
@@ -292,8 +307,11 @@ impl SharedBlockWatcher {
                 state.is_running = false;
             }
         });
-        
-        info!("Task spawned for network {}, handle created", network_slug_for_log);
+
+        info!(
+            "Task spawned for network {}, handle created",
+            network_slug_for_log
+        );
 
         Ok(handle)
     }

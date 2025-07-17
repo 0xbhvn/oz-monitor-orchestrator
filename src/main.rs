@@ -126,13 +126,13 @@ async fn run_worker(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> R
 
     // Get initial tenant assignments
     let mut assigned_tenants = load_balancer.get_worker_assignments(&worker_id).await?;
-    
+
     // If no tenants assigned and this is the first worker, assign all tenants
     if assigned_tenants.is_empty() {
         info!("No tenants assigned to worker, checking for unassigned tenants...");
         let all_tenant_ids = get_all_tenant_ids(&db_pool).await?;
         info!("Found {} tenants in database", all_tenant_ids.len());
-        
+
         // Assign each tenant to this worker
         for tenant_id in &all_tenant_ids {
             match load_balancer.assign_tenant(*tenant_id).await {
@@ -148,7 +148,7 @@ async fn run_worker(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> R
             }
         }
     }
-    
+
     info!(
         "Worker {} assigned {} tenants",
         worker_id,
@@ -271,7 +271,8 @@ async fn run_all(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> Resu
     ));
 
     // Initialize worker pool and load balancer
-    let worker_pool = MonitorWorkerPool::new(db_pool.clone(), cache.clone(), config.worker.clone().into());
+    let worker_pool =
+        MonitorWorkerPool::new(db_pool.clone(), cache.clone(), config.worker.clone().into());
     let load_balancer = Arc::new(LoadBalancer::new(config.load_balancer.clone().into()));
 
     // Get all tenant IDs and active networks
@@ -315,9 +316,9 @@ async fn run_all(config: OrchestratorConfig, db_pool: Arc<sqlx::PgPool>) -> Resu
     // Create and start worker
     let worker_id = format!("worker-{}", uuid::Uuid::new_v4());
     info!("Worker ID: {}", worker_id);
-    
+
     load_balancer.add_worker(worker_id.clone()).await?;
-    
+
     // Assign all tenants to this worker
     let mut assigned_tenants = Vec::new();
     for tenant_id in &all_tenant_ids {
