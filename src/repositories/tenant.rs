@@ -17,10 +17,70 @@ use uuid::Uuid;
 use openzeppelin_monitor::{
     models::{Monitor, Network, Trigger},
     repositories::{
-        MonitorRepositoryTrait, NetworkRepositoryTrait, NetworkService, RepositoryError,
-        TriggerRepositoryTrait, TriggerService,
+        MonitorRepositoryTrait, NetworkRepositoryTrait, NetworkService,
+        RepositoryError as OzRepositoryError, TriggerRepositoryTrait, TriggerService,
     },
 };
+
+// Import our own repository error for conversions
+use crate::repositories::error::RepositoryError;
+
+/// Convert our RepositoryError to OpenZeppelin Monitor's RepositoryError
+fn to_oz_error(err: RepositoryError) -> OzRepositoryError {
+    match err {
+        RepositoryError::ConnectionError(msg) => OzRepositoryError::internal_error(
+            format!("Database connection error: {}", msg),
+            None,
+            None,
+        ),
+        RepositoryError::QueryError(msg) => OzRepositoryError::internal_error(
+            format!("Query execution failed: {}", msg),
+            None,
+            None,
+        ),
+        RepositoryError::NotFound { entity_type, id } => {
+            OzRepositoryError::load_error(format!("{} not found: {}", entity_type, id), None, None)
+        }
+        RepositoryError::TenantNotFound(id) => {
+            OzRepositoryError::load_error(format!("Tenant not found: {}", id), None, None)
+        }
+        RepositoryError::SerializationError(msg) => {
+            OzRepositoryError::validation_error(format!("Serialization error: {}", msg), None, None)
+        }
+        RepositoryError::TransactionError(msg) => {
+            OzRepositoryError::internal_error(format!("Transaction failed: {}", msg), None, None)
+        }
+        RepositoryError::ConstraintViolation(msg) => OzRepositoryError::validation_error(
+            format!("Constraint violation: {}", msg),
+            None,
+            None,
+        ),
+    }
+}
+
+/// Convert anyhow::Error to OpenZeppelin Monitor's RepositoryError
+fn anyhow_to_oz_error(err: anyhow::Error) -> OzRepositoryError {
+    OzRepositoryError::internal_error(err.to_string(), None, None)
+}
+
+/// Execute an async function in a sync context
+fn execute_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send,
+    T: Send,
+{
+    // Instead of creating a new runtime, use Handle::try_current() to check if we're
+    // already in a runtime context
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // We're already in a runtime, use block_in_place
+        tokio::task::block_in_place(move || handle.block_on(future))
+    } else {
+        // We're not in a runtime, create a temporary one
+        tokio::runtime::Runtime::new()
+            .expect("Failed to create runtime")
+            .block_on(future)
+    }
+}
 
 /// Database model for tenant monitors
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -77,10 +137,10 @@ impl TenantAwareMonitorRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
     }
-    
+
     /// Update the tenant filter for this repository
     pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
-        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock>
         // For now, this is a no-op as the repository is created with specific tenants
         // In a real implementation, you'd want to make tenant_filter mutable
     }
@@ -99,18 +159,20 @@ impl TenantAwareMonitorRepository {
 }
 
 #[async_trait]
-impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepository> for TenantAwareMonitorRepository {
+impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepository>
+    for TenantAwareMonitorRepository
+{
     async fn new(
         _path: Option<&Path>,
         _network_service: Option<NetworkService<TenantAwareNetworkRepository>>,
         _trigger_service: Option<TriggerService<TenantAwareTriggerRepository>>,
-    ) -> Result<Self, RepositoryError> 
+    ) -> Result<Self, OzRepositoryError>
     where
-        Self: Sized
+        Self: Sized,
     {
         // This doesn't make sense for database-backed storage
         // The repository should be created with new() and tenant_filter
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Direct construction not supported - use TenantAwareMonitorRepository::new()",
             None,
             None,
@@ -121,9 +183,9 @@ impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepo
         _path: Option<&Path>,
         _network_service: Option<NetworkService<TenantAwareNetworkRepository>>,
         _trigger_service: Option<TriggerService<TenantAwareTriggerRepository>>,
-    ) -> Result<HashMap<String, Monitor>, RepositoryError> {
+    ) -> Result<HashMap<String, Monitor>, OzRepositoryError> {
         // This doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Static loading not supported - use instance methods",
             None,
             None,
@@ -131,30 +193,26 @@ impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepo
     }
 
     fn get_all(&self) -> HashMap<String, Monitor> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_all_internal().await {
-                    Ok(monitors) => monitors,
-                    Err(e) => {
-                        tracing::error!("Failed to get monitors: {}", e);
-                        HashMap::new()
-                    }
+        execute_async(async {
+            match self.get_all_internal().await {
+                Ok(monitors) => monitors,
+                Err(e) => {
+                    tracing::error!("Failed to get monitors: {}", e);
+                    HashMap::new()
                 }
-            })
+            }
         })
     }
 
     fn get(&self, name: &str) -> Option<Monitor> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_internal(name).await {
-                    Ok(monitor) => monitor,
-                    Err(e) => {
-                        tracing::error!("Failed to get monitor {}: {}", name, e);
-                        None
-                    }
+        execute_async(async {
+            match self.get_internal(name).await {
+                Ok(monitor) => monitor,
+                Err(e) => {
+                    tracing::error!("Failed to get monitor {}: {}", name, e);
+                    None
                 }
-            })
+            }
         })
     }
 
@@ -163,9 +221,9 @@ impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepo
         _path: Option<&Path>,
         _network_service: Option<NetworkService<TenantAwareNetworkRepository>>,
         _trigger_service: Option<TriggerService<TenantAwareTriggerRepository>>,
-    ) -> Result<Monitor, RepositoryError> {
+    ) -> Result<Monitor, OzRepositoryError> {
         // This method doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Path-based loading not supported",
             None,
             None,
@@ -174,7 +232,7 @@ impl MonitorRepositoryTrait<TenantAwareNetworkRepository, TenantAwareTriggerRepo
 }
 
 impl TenantAwareMonitorRepository {
-    async fn get_all_internal(&self) -> Result<HashMap<String, Monitor>> {
+    async fn get_all_internal(&self) -> Result<HashMap<String, Monitor>, OzRepositoryError> {
         let monitors = sqlx::query_as!(
             DbMonitor,
             r#"
@@ -192,20 +250,22 @@ impl TenantAwareMonitorRepository {
             &self.tenant_filter[..]
         )
         .fetch_all(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         let mut result = HashMap::new();
         for db_monitor in monitors {
             let name = db_monitor.name.clone();
-            if let Ok(monitor) = self.db_to_oz_monitor(db_monitor) {
-                result.insert(name, monitor);
-            }
+            let monitor = self
+                .db_to_oz_monitor(db_monitor)
+                .map_err(anyhow_to_oz_error)?;
+            result.insert(name, monitor);
         }
 
         Ok(result)
     }
 
-    async fn get_internal(&self, name: &str) -> Result<Option<Monitor>> {
+    async fn get_internal(&self, name: &str) -> Result<Option<Monitor>, OzRepositoryError> {
         let db_monitor = sqlx::query_as!(
             DbMonitor,
             r#"
@@ -227,10 +287,14 @@ impl TenantAwareMonitorRepository {
             name
         )
         .fetch_optional(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         match db_monitor {
-            Some(db_monitor) => Ok(Some(self.db_to_oz_monitor(db_monitor)?)),
+            Some(db_monitor) => Ok(Some(
+                self.db_to_oz_monitor(db_monitor)
+                    .map_err(anyhow_to_oz_error)?,
+            )),
             None => Ok(None),
         }
     }
@@ -247,10 +311,10 @@ impl TenantAwareNetworkRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
     }
-    
+
     /// Update the tenant filter for this repository
     pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
-        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock>
         // For now, this is a no-op as the repository is created with specific tenants
         // In a real implementation, you'd want to make tenant_filter mutable
     }
@@ -265,21 +329,21 @@ impl TenantAwareNetworkRepository {
 
 #[async_trait]
 impl NetworkRepositoryTrait for TenantAwareNetworkRepository {
-    async fn new(_path: Option<&Path>) -> Result<Self, RepositoryError>
+    async fn new(_path: Option<&Path>) -> Result<Self, OzRepositoryError>
     where
-        Self: Sized
+        Self: Sized,
     {
         // This doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Direct construction not supported - use TenantAwareNetworkRepository::new()",
             None,
             None,
         ))
     }
 
-    async fn load_all(_path: Option<&Path>) -> Result<HashMap<String, Network>, RepositoryError> {
+    async fn load_all(_path: Option<&Path>) -> Result<HashMap<String, Network>, OzRepositoryError> {
         // This doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Static loading not supported - use instance methods",
             None,
             None,
@@ -287,37 +351,32 @@ impl NetworkRepositoryTrait for TenantAwareNetworkRepository {
     }
 
     fn get_all(&self) -> HashMap<String, Network> {
-        // Use blocking task to make async call from sync context
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_all_internal().await {
-                    Ok(networks) => networks,
-                    Err(e) => {
-                        tracing::error!("Failed to get networks: {}", e);
-                        HashMap::new()
-                    }
+        execute_async(async {
+            match self.get_all_internal().await {
+                Ok(networks) => networks,
+                Err(e) => {
+                    tracing::error!("Failed to get networks: {}", e);
+                    HashMap::new()
                 }
-            })
+            }
         })
     }
 
     fn get(&self, network_id: &str) -> Option<Network> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_internal(network_id).await {
-                    Ok(network) => network,
-                    Err(e) => {
-                        tracing::error!("Failed to get network {}: {}", network_id, e);
-                        None
-                    }
+        execute_async(async {
+            match self.get_internal(network_id).await {
+                Ok(network) => network,
+                Err(e) => {
+                    tracing::error!("Failed to get network {}: {}", network_id, e);
+                    None
                 }
-            })
+            }
         })
     }
 }
 
 impl TenantAwareNetworkRepository {
-    async fn get_all_internal(&self) -> Result<HashMap<String, Network>> {
+    async fn get_all_internal(&self) -> Result<HashMap<String, Network>, OzRepositoryError> {
         let networks = sqlx::query_as!(
             DbNetwork,
             r#"
@@ -333,18 +392,21 @@ impl TenantAwareNetworkRepository {
             &self.tenant_filter[..]
         )
         .fetch_all(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         let mut result = HashMap::new();
         for db_network in networks {
-            let network = self.db_to_oz_network(db_network)?;
+            let network = self
+                .db_to_oz_network(db_network)
+                .map_err(anyhow_to_oz_error)?;
             result.insert(network.slug.clone(), network);
         }
 
         Ok(result)
     }
 
-    async fn get_internal(&self, network_id: &str) -> Result<Option<Network>> {
+    async fn get_internal(&self, network_id: &str) -> Result<Option<Network>, OzRepositoryError> {
         let db_network = sqlx::query_as!(
             DbNetwork,
             r#"
@@ -364,10 +426,14 @@ impl TenantAwareNetworkRepository {
             network_id
         )
         .fetch_optional(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         match db_network {
-            Some(db_network) => Ok(Some(self.db_to_oz_network(db_network)?)),
+            Some(db_network) => Ok(Some(
+                self.db_to_oz_network(db_network)
+                    .map_err(anyhow_to_oz_error)?,
+            )),
             None => Ok(None),
         }
     }
@@ -384,10 +450,10 @@ impl TenantAwareTriggerRepository {
     pub fn new(db: Arc<PgPool>, tenant_filter: Vec<Uuid>) -> Self {
         Self { db, tenant_filter }
     }
-    
+
     /// Update the tenant filter for this repository
     pub async fn update_tenant_filter(&self, _tenant_filter: Vec<Uuid>) {
-        // Since tenant_filter is not mutable, we would need to use Arc<RwLock> 
+        // Since tenant_filter is not mutable, we would need to use Arc<RwLock>
         // For now, this is a no-op as the repository is created with specific tenants
         // In a real implementation, you'd want to make tenant_filter mutable
     }
@@ -405,21 +471,21 @@ impl TenantAwareTriggerRepository {
 
 #[async_trait]
 impl TriggerRepositoryTrait for TenantAwareTriggerRepository {
-    async fn new(_path: Option<&Path>) -> Result<Self, RepositoryError>
+    async fn new(_path: Option<&Path>) -> Result<Self, OzRepositoryError>
     where
-        Self: Sized
+        Self: Sized,
     {
         // This doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Direct construction not supported - use TenantAwareTriggerRepository::new()",
             None,
             None,
         ))
     }
 
-    async fn load_all(_path: Option<&Path>) -> Result<HashMap<String, Trigger>, RepositoryError> {
+    async fn load_all(_path: Option<&Path>) -> Result<HashMap<String, Trigger>, OzRepositoryError> {
         // This doesn't make sense for database-backed storage
-        Err(RepositoryError::load_error(
+        Err(OzRepositoryError::load_error(
             "Static loading not supported - use instance methods",
             None,
             None,
@@ -427,30 +493,26 @@ impl TriggerRepositoryTrait for TenantAwareTriggerRepository {
     }
 
     fn get_all(&self) -> HashMap<String, Trigger> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_all_internal().await {
-                    Ok(triggers) => triggers,
-                    Err(e) => {
-                        tracing::error!("Failed to get triggers: {}", e);
-                        HashMap::new()
-                    }
+        execute_async(async {
+            match self.get_all_internal().await {
+                Ok(triggers) => triggers,
+                Err(e) => {
+                    tracing::error!("Failed to get triggers: {}", e);
+                    HashMap::new()
                 }
-            })
+            }
         })
     }
 
     fn get(&self, name: &str) -> Option<Trigger> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_internal(name).await {
-                    Ok(trigger) => trigger,
-                    Err(e) => {
-                        tracing::error!("Failed to get trigger {}: {}", name, e);
-                        None
-                    }
+        execute_async(async {
+            match self.get_internal(name).await {
+                Ok(trigger) => trigger,
+                Err(e) => {
+                    tracing::error!("Failed to get trigger {}: {}", name, e);
+                    None
                 }
-            })
+            }
         })
     }
 }
@@ -458,20 +520,18 @@ impl TriggerRepositoryTrait for TenantAwareTriggerRepository {
 impl TenantAwareTriggerRepository {
     /// Get triggers by monitor ID (not part of trait)
     pub fn get_by_monitor_id(&self, monitor_id: &str) -> Vec<Trigger> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match self.get_by_monitor_id_internal(monitor_id).await {
-                    Ok(triggers) => triggers,
-                    Err(e) => {
-                        tracing::error!("Failed to get triggers for monitor {}: {}", monitor_id, e);
-                        Vec::new()
-                    }
+        execute_async(async {
+            match self.get_by_monitor_id_internal(monitor_id).await {
+                Ok(triggers) => triggers,
+                Err(e) => {
+                    tracing::error!("Failed to get triggers for monitor {}: {}", monitor_id, e);
+                    Vec::new()
                 }
-            })
+            }
         })
     }
 
-    async fn get_all_internal(&self) -> Result<HashMap<String, Trigger>> {
+    async fn get_all_internal(&self) -> Result<HashMap<String, Trigger>, OzRepositoryError> {
         let triggers = sqlx::query_as!(
             DbTrigger,
             r#"
@@ -488,20 +548,22 @@ impl TenantAwareTriggerRepository {
             &self.tenant_filter[..]
         )
         .fetch_all(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         let mut result = HashMap::new();
         for db_trigger in triggers {
             let name = db_trigger.name.clone();
-            if let Ok(trigger) = self.db_to_oz_trigger(db_trigger) {
-                result.insert(name, trigger);
-            }
+            let trigger = self
+                .db_to_oz_trigger(db_trigger)
+                .map_err(anyhow_to_oz_error)?;
+            result.insert(name, trigger);
         }
 
         Ok(result)
     }
 
-    async fn get_internal(&self, name: &str) -> Result<Option<Trigger>> {
+    async fn get_internal(&self, name: &str) -> Result<Option<Trigger>, OzRepositoryError> {
         let db_trigger = sqlx::query_as!(
             DbTrigger,
             r#"
@@ -522,15 +584,22 @@ impl TenantAwareTriggerRepository {
             name
         )
         .fetch_optional(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         match db_trigger {
-            Some(db_trigger) => Ok(Some(self.db_to_oz_trigger(db_trigger)?)),
+            Some(db_trigger) => Ok(Some(
+                self.db_to_oz_trigger(db_trigger)
+                    .map_err(anyhow_to_oz_error)?,
+            )),
             None => Ok(None),
         }
     }
 
-    async fn get_by_monitor_id_internal(&self, monitor_id: &str) -> Result<Vec<Trigger>> {
+    async fn get_by_monitor_id_internal(
+        &self,
+        monitor_id: &str,
+    ) -> Result<Vec<Trigger>, OzRepositoryError> {
         let triggers = sqlx::query_as!(
             DbTrigger,
             r#"
@@ -551,16 +620,17 @@ impl TenantAwareTriggerRepository {
             monitor_id
         )
         .fetch_all(&*self.db)
-        .await?;
+        .await
+        .map_err(|e| to_oz_error(RepositoryError::from(e)))?;
 
         let mut result = Vec::new();
         for db_trigger in triggers {
-            if let Ok(trigger) = self.db_to_oz_trigger(db_trigger) {
-                result.push(trigger);
-            }
+            let trigger = self
+                .db_to_oz_trigger(db_trigger)
+                .map_err(anyhow_to_oz_error)?;
+            result.push(trigger);
         }
 
         Ok(result)
     }
 }
-
