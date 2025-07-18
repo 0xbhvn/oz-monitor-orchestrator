@@ -179,6 +179,25 @@ impl ConfigurationManager {
 }
 ```
 
+### Configuration Update Considerations
+
+**Current Implementation Status**: The orchestrator currently loads configurations once at worker startup and caches them in memory. Configuration updates require worker restarts to take effect.
+
+**Key Points**:
+
+- Tenant configurations are loaded from PostgreSQL when workers start
+- In-memory caching using `DashMap` for performance
+- No automatic cache invalidation or refresh
+- Worker restart required for configuration changes
+
+**Future Enhancements**:
+
+- PostgreSQL LISTEN/NOTIFY for real-time updates (shown above)
+- Redis-based configuration distribution
+- Automatic cache refresh without service disruption
+
+For detailed information about configuration update behavior and workarounds, see the [Configuration Updates Documentation](./configuration-updates.md).
+
 ## 4. Kubernetes Deployment
 
 Deploy with Kubernetes for orchestration and auto-scaling:

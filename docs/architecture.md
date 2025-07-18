@@ -116,6 +116,41 @@ flowchart TB
 - API Key Scoping: Fine-grained access control
 - Audit Trail: All actions logged with context
 
+## Configuration Management & Caching
+
+### Configuration Flow
+
+1. **Storage**: All tenant configurations stored in PostgreSQL
+   - Monitor definitions with filter rules
+   - Network configurations and RPC endpoints
+   - Trigger definitions and scripts
+
+2. **Loading**: Workers load configurations on startup
+   - Tenant-aware repositories query PostgreSQL
+   - Configurations cached in memory (`DashMap` structures)
+   - No automatic refresh mechanism currently
+
+3. **Caching Behavior**:
+   - In-memory cache persists for worker lifetime
+   - No TTL or invalidation mechanism
+   - Configuration changes require worker restart
+
+4. **Update Propagation**:
+   - Database updates don't trigger cache refresh
+   - Workers continue with cached configurations
+   - See [Configuration Updates Documentation](./configuration-updates.md) for details
+
+### Cache Architecture
+
+```bash
+PostgreSQL (Source of Truth)
+    ↓ (Load on startup)
+Worker Memory Cache
+    - monitor_cache: DashMap<Uuid, HashMap<String, Monitor>>
+    - contract_spec_cache: DashMap<String, ContractSpec>
+    - trigger_script_cache: DashMap<String, String>
+```
+
 ## Deployment Architecture
 
 - Kubernetes Native: Designed for K8s deployment
