@@ -206,6 +206,8 @@ Polls blockchains on cron schedules and coordinates the processing pipeline. Use
 - `process_block()` - Handles individual blocks
 - `shutdown()` - Graceful shutdown
 
+> **Implementation Details**: See [BlockWatcher Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#11-blockwatcher-service-wrapper)
+
 ### 2. Client Pool
 
 **Location**: `src/services/blockchain/`
@@ -216,6 +218,8 @@ Thread-safe pool of blockchain clients with lazy initialization. Handles connect
 
 - `get_client(network_id)` - Returns client for network
 - `invalidate(network_id)` - Forces reconnection
+
+> **Implementation Details**: See [Client Pool Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#12-client-pool-service-wrapper)
 
 ### 3. Filter Service
 
@@ -228,6 +232,8 @@ Evaluates monitor conditions against blockchain data. Supports expression-based 
 - `filter_block(block, monitors)` - Returns matches
 - `evaluate_expression(expr, context)` - Evaluates conditions
 
+> **Implementation Details**: See [Filter Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#13-filter-service-wrapper)
+
 ### 4. Trigger Service
 
 **Location**: `src/services/trigger/`
@@ -239,6 +245,8 @@ Executes actions when monitor conditions match. Supports parallel execution with
 - `process_matches(matches)` - Evaluates triggers
 - `execute_script(script, context)` - Runs custom scripts
 
+> **Implementation Details**: See [Trigger Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#14-trigger-service-wrapper)
+
 ### 5. Notification Service
 
 **Location**: `src/services/notification/`
@@ -249,6 +257,8 @@ Sends notifications through multiple channels (Slack, Email, Discord, Telegram, 
 
 - `send_notification(trigger, context)` - Sends alert
 - `substitute_variables(template, data)` - Fills templates
+
+> **Implementation Details**: See [Notification Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#15-notification-service-wrapper)
 
 ### 6. Storage Components
 
@@ -274,16 +284,19 @@ Extract services by creating API boundaries around existing components:
    - Expose gRPC/REST API for block streaming
    - Publish blocks to message queue (Kafka/RabbitMQ)
    - Package as Docker container
+   - See [BlockWatcher Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#11-blockwatcher-service-wrapper)
 
 2. **Client Pool Service**
    - Create RPC proxy with connection management
    - REST API for health checks and metrics
    - Support dynamic endpoint configuration
+   - See [Client Pool Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#12-client-pool-service-wrapper)
 
 3. **Filter Service**
    - Stateless REST API for filter evaluation
    - Input: block data + monitor conditions
    - Output: matches
+   - See [Filter Service Wrapper](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#13-filter-service-wrapper)
 
 ### Phase 2: Communication Infrastructure
 
@@ -316,6 +329,8 @@ Configurations are loaded from files at startup:
 ### Multi-Tenant Configuration Service
 
 To support multiple tenants without service restarts, we'll add configuration management at the microservice layer without modifying the original code.
+
+> **Implementation Guide**: See [Week 3: Configuration Service](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#week-3-configuration-service) for detailed implementation steps
 
 #### Architecture
 
@@ -424,41 +439,64 @@ channel:config:{tenant_id}          # Pub/sub channel
 
 ## Implementation Plan
 
+> **📋 Detailed Implementation Checklist**: For a comprehensive breakdown of all tasks with nested checklists, see [MICROSERVICES_IMPLEMENTATION_CHECKLIST.md](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md)
+
 ### Week 1-2: Service Extraction
 
 - [ ] Create service wrappers (not modifying original code)
+  - See [Service Wrappers Section](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#1-create-service-wrappers-not-modifying-original-code)
 - [ ] Define APIs that mirror existing interfaces
+  - See [API Definitions Section](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#2-define-apis-that-mirror-existing-interfaces)
 - [ ] Set up development environment
+  - See [Development Environment Section](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#3-set-up-development-environment)
 - [ ] Keep monolith running
+  - See [Monolith Compatibility Section](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#4-keep-monolith-running)
 
 ### Week 3: Configuration Service
 
 - [ ] Build Configuration Service with Redis + PostgreSQL
+  - See [Configuration Service Structure](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#1-build-configuration-service-with-redis--postgresql)
 - [ ] Create REST/gRPC API
+  - See [API Implementation](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#2-create-restgrpc-api)
 - [ ] Implement configuration managers for each wrapper
+  - See [Configuration Managers](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#3-implement-configuration-managers-for-each-wrapper)
 - [ ] Set up pub/sub for change events
+  - See [Pub/Sub Implementation](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#4-set-up-pubsub-for-change-events)
 
 ### Week 4: Integration
 
 - [ ] Connect microservices to Configuration Service
+  - See [Service Integration](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#1-connect-microservices-to-configuration-service)
 - [ ] Implement service discovery
+  - See [Service Discovery](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#2-implement-service-discovery)
 - [ ] Create API gateway
+  - See [API Gateway](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#3-create-api-gateway)
 - [ ] Test end-to-end flow
+  - See [Testing](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#4-test-end-to-end-flow)
 
 ### Week 5: Multi-Tenant Features
 
 - [ ] Add tenant isolation in configuration managers
+  - See [Tenant Isolation](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#1-add-tenant-isolation-in-configuration-managers)
 - [ ] Implement config versioning
+  - See [Config Versioning](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#2-implement-config-versioning)
 - [ ] Performance testing
+  - See [Performance Testing](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#3-performance-testing)
 - [ ] Security audit
+  - See [Security Audit](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#4-security-audit)
 
 ### Week 6: Deployment
 
 - [ ] Deploy Configuration Service
+  - See [Configuration Service Deployment](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#1-deploy-configuration-service)
 - [ ] Deploy microservices alongside monolith
+  - See [Microservices Deployment](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#2-deploy-microservices-alongside-monolith)
 - [ ] A/B test both systems
+  - See [A/B Testing](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#3-ab-test-both-systems)
 - [ ] Create migration tools
+  - See [Migration Tools](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#4-create-migration-tools)
 - [ ] Documentation
+  - See [Documentation](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#5-documentation)
 
 ### Success Metrics
 
@@ -467,6 +505,8 @@ channel:config:{tenant_id}          # Pub/sub channel
 - 99.9% uptime
 - Zero-downtime config updates
 - Sub-second config propagation
+
+> **Validation Checklist**: See [Success Criteria Validation](./MICROSERVICES_IMPLEMENTATION_CHECKLIST.md#success-criteria-validation)
 
 ### Risk Mitigation
 
